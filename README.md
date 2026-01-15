@@ -1,30 +1,32 @@
-# YQHunter v2.0
+# YQHunter v2.1
 
 一个综合性 Web 安全扫描工具，使用 Go 语言编写。
 
-## 版本更新 (v2.0)
+## 版本更新 (v2.1)
 
 ### 新增功能
 - **综合扫描 HTML 报告**：全面扫描现在生成包含所有模块结果的精美 HTML 报告
 - **增强的指纹库**：包含 8654+ 条指纹识别规则
-- **优化的输出格式**：自动根据文件扩展名检测输出格式
-- **改进的代理支持**：支持 HTTP 和 SOCKS5 代理配置
+- **自动输出文件**：未指定输出文件时，自动使用当前时间生成txt文件
 
 ### 重要变更
+- **XSS 和 SSRF 合并**：使用 `-x` 参数同时扫描 XSS 和 SSRF 漏洞
+- **移除 -s 参数**：不再支持单独的 SSRF 扫描
+- **移除 -F 参数**：不再支持指定输出格式，直接使用 `-o` 参数
 - **综合扫描输出限制**：使用 `-a` 参数进行综合扫描时，只支持 HTML 格式输出
-- **其他扫描格式**：单独扫描（XSS、SSRF、CORS、目录、指纹）支持 HTML、JSON、CSV、TXT 格式
+- **其他扫描格式**：单独扫描（XSS+SSRF、CORS、目录、指纹）支持 HTML、JSON、CSV、TXT 格式
 - **默认格式**：如果未指定格式或文件扩展名，默认使用 TXT 格式
 
 ## 功能特性
 
-- **XSS 漏洞扫描**：检测跨站脚本漏洞
-- **SSRF 漏洞扫描**：识别服务器端请求伪造问题
+- **XSS 和 SSRF 漏洞扫描**：检测跨站脚本和服务器端请求伪造漏洞
 - **CORS 配置错误检测**：发现跨域资源共享问题
 - **Web 爬虫**：爬取并发现所有页面和端点
 - **目录扫描**：枚举隐藏目录和文件，支持自定义字典
 - **指纹识别**：识别技术、框架和服务
 - **API 端点发现**：查找暴露的 API 端点
 - **多格式输出**：支持 HTML、JSON、CSV、TXT 格式报告
+- **自动输出**：未指定输出文件时，自动使用当前时间生成txt文件
 
 ## 安装
 
@@ -51,24 +53,19 @@ Flags:
   -z, --dict string     字典文件路径（用于目录扫描）
   -d, --dir             启用目录扫描
   -f, --fingerprint     启用指纹识别
-  -F, --format string   输出格式（html, json, csv, txt，默认根据文件扩展名自动判断）
   -h, --help            help for yqhunter
-  -o, --output string   报告输出文件（支持格式：html, json, csv, txt）
+  -o, --output string   报告输出文件（支持格式：html, json, csv, txt，默认自动生成txt文件）
       --proxy string    代理地址（例如：http://127.0.0.1:8080 或 socks5://127.0.0.1:1080）
   -p, --spider          启用爬虫
-  -s, --ssrf            启用 SSRF 扫描
   -u, --url string      目标 URL（必需）
-  -x, --xss             启用 XSS 扫描
+  -x, --xss             启用 XSS 和 SSRF 扫描
 ```
 
 ### 基础扫描示例
 
 ```bash
-# XSS 扫描
+# XSS 和 SSRF 扫描
 yqhunter -x -u https://example.com
-
-# SSRF 扫描
-yqhunter -s -u https://example.com
 
 # CORS 扫描
 yqhunter -c -u https://example.com
@@ -117,8 +114,9 @@ yqhunter -a -u https://example.com -o report.html
 # 爬虫结果导出为 JSON
 yqhunter -p -u https://example.com -o spider.json
 
-# 指定输出格式
-yqhunter -d -u https://example.com -o dirs.txt -F txt
+# 未指定输出文件（自动生成txt文件）
+yqhunter -x -u https://example.com
+# 自动生成文件名格式：2026-01-15-15-31.txt
 ```
 
 ### 使用代理
@@ -149,7 +147,6 @@ general:
 
 scanner:
   enable_xss: true
-  enable_ssrf: true
   enable_cors: true
   xss_payloads:
     - "<script>alert('XSS')</script>"
@@ -284,8 +281,7 @@ XSS,https://example.com/search,<script>alert('XSS')</script>,高,反射型 XSS �
 
 ### 扫描器设置
 
-- `enable_xss`：启用 XSS 漏洞扫描
-- `enable_ssrf`：启用 SSRF 漏洞扫描
+- `enable_xss`：启用 XSS 和 SSRF 漏洞扫描
 - `enable_cors`：启用 CORS 配置错误检测
 - `enable_dir_scan`：启用目录扫描
 - `enable_fingerprint`：启用指纹识别

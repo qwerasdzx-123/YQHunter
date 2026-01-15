@@ -1,0 +1,15 @@
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+config.yaml
+reports/
+wordlists/
+.DS_Store
+*.log
+../YQHunter_backup/
+../replace_author.py

@@ -455,6 +455,23 @@ func ScanCORS(target string, cfg *config.Config) []Vulnerability {
 	return vulns
 }
 
+type dirScanTask struct {
+	path    string
+	fullURL string
+}
+
+func buildDirScanURL(targetURL *url.URL, dir string) string {
+	reference, err := url.Parse(dir)
+	if err != nil {
+		return targetURL.String() + "/" + dir
+	}
+	return targetURL.ResolveReference(reference).String()
+}
+
+func isNotFoundStatus(statusCode int) bool {
+	return statusCode == 404
+}
+
 func ScanDirectories(target string, cfg *config.Config) []DirResult {
 	results := make([]DirResult, 0)
 	resultsChan := make(chan DirResult, 100)
@@ -505,7 +522,7 @@ func ScanDirectories(target string, cfg *config.Config) []DirResult {
 		return results
 	}
 
-	taskChan := make(chan string, 100)
+	taskChan := make(chan dirScanTask, 100)
 	var wg sync.WaitGroup
 	total := len(wordlist)
 	scanned := 0
@@ -517,15 +534,15 @@ func ScanDirectories(target string, cfg *config.Config) []DirResult {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for dir := range taskChan {
-				reference, err := url.Parse(dir)
+			for task := range taskChan {
+				req, err := http.NewRequest("HEAD", task.fullURL, nil)
 				if err != nil {
-					continue
-				}
-				testURL := targetURL.ResolveReference(reference)
-
-				req, err := http.NewRequest("HEAD", testURL.String(), nil)
-				if err != nil {
+					mu.Lock()
+					scanned++
+					if scanned%50 == 0 || scanned == total {
+						fmt.Printf("进度: %d/%d (%.1f%%)\n", scanned, total, float64(scanned)*100/float64(total))
+					}
+					mu.Unlock()
 					continue
 				}
 
@@ -533,14 +550,20 @@ func ScanDirectories(target string, cfg *config.Config) []DirResult {
 
 				resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 				if err != nil {
+					mu.Lock()
+					scanned++
+					if scanned%50 == 0 || scanned == total {
+						fmt.Printf("进度: %d/%d (%.1f%%)\n", scanned, total, float64(scanned)*100/float64(total))
+					}
+					mu.Unlock()
 					continue
 				}
 				resp.Body.Close()
 
-				if resp.StatusCode != 404 {
+				if !isNotFoundStatus(resp.StatusCode) {
 					resultsChan <- DirResult{
-						FullURL:    testURL.String(),
-						Path:       "/" + dir,
+						FullURL:    task.fullURL,
+						Path:       task.path,
 						StatusCode: resp.StatusCode,
 						Size:       resp.ContentLength,
 					}
@@ -558,7 +581,10 @@ func ScanDirectories(target string, cfg *config.Config) []DirResult {
 
 	go func() {
 		for _, dir := range wordlist {
-			taskChan <- dir
+			taskChan <- dirScanTask{
+				path:    dir,
+				fullURL: buildDirScanURL(targetURL, dir),
+			}
 		}
 		close(taskChan)
 	}()

@@ -63,7 +63,7 @@ func createHTTPClient(cfg *config.Config) *http.Client {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
-		DisableKeepAlives:   false,
+		DisableKeepAlives:   true,
 	}
 
 	if cfg.General.Proxy != "" {
@@ -79,20 +79,69 @@ func createHTTPClient(cfg *config.Config) *http.Client {
 	}
 }
 
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe") {
+		return true
+	}
+
+	return false
+}
+
+func isRetryableStatusCode(statusCode int) bool {
+	if statusCode >= 500 && statusCode <= 599 {
+		return true
+	}
+	return false
+}
+
 func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int) (*http.Response, error) {
 	var lastErr error
+	var lastResp *http.Response
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		resp, err := client.Do(req)
-		if err == nil {
+		if err == nil && resp != nil {
 			return resp, nil
 		}
 
-		lastErr = err
+		if err != nil {
+			lastErr = err
+			if !isRetryableError(err) {
+				return nil, err
+			}
+		}
+
+		if resp != nil {
+			if lastResp != nil {
+				lastResp.Body.Close()
+			}
+			lastResp = resp
+
+			if !isRetryableStatusCode(resp.StatusCode) {
+				return resp, nil
+			}
+		}
 
 		if attempt < maxRetries {
 			backoff := time.Duration(attempt*attempt) * time.Second
 			time.Sleep(backoff)
+
+			if req.Body != nil {
+				if req.GetBody != nil {
+					newBody, err := req.GetBody()
+					if err == nil {
+						req.Body = newBody
+					}
+				}
+			}
 		}
 	}
 
@@ -224,7 +273,7 @@ func ScanXSS(target string, cfg *config.Config) []Vulnerability {
 			req.Header.Set("User-Agent", cfg.General.UserAgent)
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-			resp, err := client.Do(req)
+			resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 			if err != nil {
 				continue
 			}
@@ -260,7 +309,7 @@ func ScanXSS(target string, cfg *config.Config) []Vulnerability {
 
 			req.Header.Set("User-Agent", cfg.General.UserAgent)
 
-			resp, err := client.Do(req)
+			resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 			if err != nil {
 				continue
 			}
@@ -369,7 +418,7 @@ func ScanSSRF(target string, cfg *config.Config) []Vulnerability {
 
 		req.Header.Set("User-Agent", cfg.General.UserAgent)
 
-		resp, err := client.Do(req)
+		resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 		if err != nil {
 			continue
 		}
@@ -420,7 +469,7 @@ func ScanCORS(target string, cfg *config.Config) []Vulnerability {
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Access-Control-Request-Method", "GET")
 
-		resp, err := client.Do(req)
+		resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 		if err != nil {
 			continue
 		}
@@ -633,7 +682,7 @@ func DetectFingerprints(target string, cfg *config.Config) []Fingerprint {
 
 	req.Header.Set("User-Agent", cfg.General.UserAgent)
 
-	resp, err := client.Do(req)
+	resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 	if err != nil {
 		return fingerprints
 	}
@@ -679,7 +728,7 @@ func DiscoverAPIEndpoints(target string, cfg *config.Config) []APIEndpoint {
 
 		req.Header.Set("User-Agent", cfg.General.UserAgent)
 
-		resp, err := client.Do(req)
+		resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 		if err != nil {
 			continue
 		}

@@ -187,38 +187,53 @@ var rootRun = func(cmd *cobra.Command, args []string) {
 			}
 		} else {
 			if enableSpider && spiderResults != nil {
-				err := spider.ExportResults(spiderResults, outputReport, detectFormat(outputReport))
+				spiderOutput := getModuleOutputFile(outputReport, "spider")
+				err := spider.ExportResults(spiderResults, detectFormat(spiderOutput), spiderOutput)
 				if err != nil {
 					fmt.Printf("导出爬虫结果失败: %v\n", err)
+				} else {
+					fmt.Printf("爬虫结果已导出到: %s\n", spiderOutput)
 				}
 			}
 
 			if enableXSS {
 				allVulns := append(xssVulns, ssrfVulns...)
-				err := exportVulnerabilities(allVulns, "XSS+SSRF", outputReport)
+				xssOutput := getModuleOutputFile(outputReport, "xss")
+				err := exportVulnerabilities(allVulns, "XSS+SSRF", xssOutput)
 				if err != nil {
 					fmt.Printf("导出 XSS+SSRF 扫描结果失败: %v\n", err)
+				} else {
+					fmt.Printf("XSS+SSRF 扫描结果已导出到: %s\n", xssOutput)
 				}
 			}
 
 			if enableCORS {
-				err := exportVulnerabilities(corsVulns, "CORS", outputReport)
+				corsOutput := getModuleOutputFile(outputReport, "cors")
+				err := exportVulnerabilities(corsVulns, "CORS", corsOutput)
 				if err != nil {
 					fmt.Printf("导出 CORS 扫描结果失败: %v\n", err)
+				} else {
+					fmt.Printf("CORS 扫描结果已导出到: %s\n", corsOutput)
 				}
 			}
 
 			if enableDir {
-				err := exportDirResults(targetURL, dirPaths, outputReport, detectFormat(outputReport))
+				dirOutput := getModuleOutputFile(outputReport, "dir")
+				err := exportDirResults(targetURL, dirPaths, dirOutput, detectFormat(dirOutput))
 				if err != nil {
 					fmt.Printf("导出目录扫描结果失败: %v\n", err)
+				} else {
+					fmt.Printf("目录扫描结果已导出到: %s\n", dirOutput)
 				}
 			}
 
 			if enableFingerprint {
-				err := exportFingerprintResults(targetURL, fingerprints, outputReport, detectFormat(outputReport))
+				fingerprintOutput := getModuleOutputFile(outputReport, "fingerprint")
+				err := exportFingerprintResults(targetURL, fingerprints, fingerprintOutput, detectFormat(fingerprintOutput))
 				if err != nil {
 					fmt.Printf("导出指纹识别结果失败: %v\n", err)
+				} else {
+					fmt.Printf("指纹识别结果已导出到: %s\n", fingerprintOutput)
 				}
 			}
 		}
@@ -1035,6 +1050,19 @@ func createHTTPClient(timeout int) *http.Client {
 		Transport: transport,
 		Timeout:   time.Duration(timeout) * time.Second,
 	}
+}
+
+func getModuleOutputFile(baseFile, module string) string {
+	ext := ""
+	if strings.Contains(baseFile, ".") {
+		parts := strings.Split(baseFile, ".")
+		if len(parts) > 1 {
+			ext = "." + parts[len(parts)-1]
+		}
+	}
+
+	baseWithoutExt := strings.TrimSuffix(baseFile, ext)
+	return fmt.Sprintf("%s_%s%s", baseWithoutExt, module, ext)
 }
 
 func detectFormat(filename string) string {

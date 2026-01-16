@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,7 +56,11 @@ type APIEndpoint struct {
 }
 
 func createHTTPClient(cfg *config.Config) *http.Client {
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: cfg.General.SkipSSLVerify,
+		},
+	}
 
 	if cfg.General.Proxy != "" {
 		parsedURL, err := url.Parse(cfg.General.Proxy)
@@ -199,9 +204,9 @@ func ScanXSS(target string, cfg *config.Config) []Vulnerability {
 			if err != nil {
 				continue
 			}
-			defer resp.Body.Close()
 
 			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			if err != nil {
 				continue
 			}
@@ -235,9 +240,9 @@ func ScanXSS(target string, cfg *config.Config) []Vulnerability {
 			if err != nil {
 				continue
 			}
-			defer resp.Body.Close()
 
 			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			if err != nil {
 				continue
 			}
@@ -344,9 +349,9 @@ func ScanSSRF(target string, cfg *config.Config) []Vulnerability {
 		if err != nil {
 			continue
 		}
-		defer resp.Body.Close()
 
 		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
 			continue
 		}
@@ -395,10 +400,10 @@ func ScanCORS(target string, cfg *config.Config) []Vulnerability {
 		if err != nil {
 			continue
 		}
-		defer resp.Body.Close()
 
 		accessControlAllowOrigin := resp.Header.Get("Access-Control-Allow-Origin")
 		accessControlAllowCredentials := resp.Header.Get("Access-Control-Allow-Credentials")
+		resp.Body.Close()
 
 		if accessControlAllowOrigin == "*" || accessControlAllowOrigin == origin {
 			if accessControlAllowCredentials == "true" {
@@ -428,6 +433,7 @@ func ScanCORS(target string, cfg *config.Config) []Vulnerability {
 
 func ScanDirectories(target string, cfg *config.Config) []DirResult {
 	results := make([]DirResult, 0)
+	resultsChan := make(chan DirResult, 100)
 
 	client := createHTTPClient(cfg)
 
@@ -443,36 +449,90 @@ func ScanDirectories(target string, cfg *config.Config) []DirResult {
 			wordlist = loadedWordlist
 			fmt.Printf("使用字典文件: %s (%d 条记录)\n", cfg.Scanner.DictFile, len(wordlist))
 		} else {
-			fmt.Printf("加载字典文件失败: %v，使用默认字典\n", err)
+			fmt.Printf("加载字典文件失败: %v，尝试从 dictionaries 目录加载默认字典\n", err)
+			defaultDict := "dictionaries/common.txt"
+			loadedWordlist, err := loadWordlist(defaultDict)
+			if err == nil && len(loadedWordlist) > 0 {
+				wordlist = loadedWordlist
+				fmt.Printf("使用默认字典文件: %s (%d 条记录)\n", defaultDict, len(wordlist))
+			} else {
+				fmt.Printf("加载默认字典文件失败: %v，使用内置小字典\n", err)
+			}
+		}
+	} else {
+		defaultDict := "dictionaries/common.txt"
+		loadedWordlist, err := loadWordlist(defaultDict)
+		if err == nil && len(loadedWordlist) > 0 {
+			wordlist = loadedWordlist
+			fmt.Printf("使用默认字典文件: %s (%d 条记录)\n", defaultDict, len(wordlist))
+		} else {
+			fmt.Printf("加载默认字典文件失败: %v，使用内置小字典\n", err)
 		}
 	}
+
+	concurrency := cfg.General.Concurrency
+	if concurrency <= 0 {
+		concurrency = 10
+	}
+
+	semaphore := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	total := len(wordlist)
+	scanned := 0
+	var mu sync.Mutex
+
+	fmt.Printf("开始目录扫描，并发数: %d\n", concurrency)
 
 	for _, dir := range wordlist {
-		testURL := target + "/" + dir
+		wg.Add(1)
+		go func(d string) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
 
-		req, err := http.NewRequest("GET", testURL, nil)
-		if err != nil {
-			continue
-		}
+			testURL := target + "/" + d
 
-		req.Header.Set("User-Agent", cfg.General.UserAgent)
+			req, err := http.NewRequest("GET", testURL, nil)
+			if err != nil {
+				return
+			}
 
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		resp.Body.Close()
+			req.Header.Set("User-Agent", cfg.General.UserAgent)
 
-		if resp.StatusCode != 404 {
-			results = append(results, DirResult{
-				FullURL:    testURL,
-				Path:       "/" + dir,
-				StatusCode: resp.StatusCode,
-				Size:       resp.ContentLength,
-			})
-		}
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != 404 {
+				resultsChan <- DirResult{
+					FullURL:    testURL,
+					Path:       "/" + d,
+					StatusCode: resp.StatusCode,
+					Size:       resp.ContentLength,
+				}
+			}
+
+			mu.Lock()
+			scanned++
+			if scanned%50 == 0 || scanned == total {
+				fmt.Printf("进度: %d/%d (%.1f%%)\n", scanned, total, float64(scanned)*100/float64(total))
+			}
+			mu.Unlock()
+		}(dir)
 	}
 
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	for result := range resultsChan {
+		results = append(results, result)
+	}
+
+	fmt.Printf("目录扫描完成。发现 %d 个路径\n", len(results))
 	return results
 }
 

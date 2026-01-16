@@ -46,10 +46,16 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 		cfg.MaxDepth = depth
 	}
 	
-	c := colly.NewCollector(
+	collectorOpts := []colly.CollectorOption{
 		colly.MaxDepth(cfg.MaxDepth),
 		colly.Async(true),
-	)
+	}
+	
+	if len(cfg.AllowDomains) > 0 {
+		collectorOpts = append(collectorOpts, colly.AllowedDomains(cfg.AllowDomains...))
+	}
+	
+	c := colly.NewCollector(collectorOpts...)
 	
 	if cfg.Proxy != "" {
 		err := c.SetProxy(cfg.Proxy)
@@ -68,6 +74,8 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 	
 	var mu sync.Mutex
 	urlSet := make(map[string]bool)
+	urlCount := 0
+	maxPages := cfg.MaxPages
 	
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
@@ -79,9 +87,10 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 		if !urlSet[absoluteURL] {
 			urlSet[absoluteURL] = true
 			result.URLs = append(result.URLs, URLInfo{URL: absoluteURL, Title: ""})
+			urlCount++
 		}
 		
-		if cfg.FollowLinks {
+		if cfg.FollowLinks && (maxPages <= 0 || urlCount < maxPages) {
 			e.Request.Visit(link)
 		}
 	})

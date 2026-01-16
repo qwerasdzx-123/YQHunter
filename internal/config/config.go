@@ -113,7 +113,7 @@ func setDefaults(cfg *Config) {
 			"http://[::1]",
 			"file:///etc/passwd",
 		},
-		DirWordlist:     "wordlists/directories.txt",
+		DirWordlist:     "dictionaries/common.txt",
 		FingerprintFile: "fingerprints.yaml",
 	}
 	

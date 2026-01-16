@@ -44,6 +44,59 @@ func extractTitle(bodyStr string) string {
 	return ""
 }
 
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe") {
+		return true
+	}
+
+	return false
+}
+
+func isRetryableStatusCode(statusCode int) bool {
+	if statusCode >= 500 && statusCode <= 599 {
+		return true
+	}
+	return false
+}
+
+func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int) (*http.Response, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		resp, err := client.Do(req)
+
+		if err != nil {
+			lastErr = err
+			if !isRetryableError(err) {
+				return nil, err
+			}
+		} else {
+			if !isRetryableStatusCode(resp.StatusCode) {
+				return resp, nil
+			}
+
+			if resp != nil {
+				resp.Body.Close()
+			}
+		}
+
+		if attempt < maxRetries {
+			backoff := time.Duration(attempt*attempt) * time.Second
+			time.Sleep(backoff)
+		}
+	}
+
+	return nil, lastErr
+}
+
 type FingerprintRule struct {
 	ID          string    `yaml:"id"`
 	Name        string    `yaml:"name"`
@@ -152,7 +205,7 @@ func Detect(target string, db *FingerprintDatabase, cfg *config.Config) []Finger
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
 		req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 
-		resp, err := client.Do(req)
+		resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 		if err != nil {
 			return nil, err
 		}

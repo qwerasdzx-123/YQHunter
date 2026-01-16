@@ -63,7 +63,7 @@ func createHTTPClient(cfg *config.Config) *http.Client {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
-		DisableKeepAlives:   true,
+		DisableKeepAlives:   false,
 	}
 
 	if cfg.General.Proxy != "" {
@@ -104,29 +104,22 @@ func isRetryableStatusCode(statusCode int) bool {
 
 func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int) (*http.Response, error) {
 	var lastErr error
-	var lastResp *http.Response
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		resp, err := client.Do(req)
-		if err == nil && resp != nil {
-			return resp, nil
-		}
 
 		if err != nil {
 			lastErr = err
 			if !isRetryableError(err) {
 				return nil, err
 			}
-		}
-
-		if resp != nil {
-			if lastResp != nil {
-				lastResp.Body.Close()
-			}
-			lastResp = resp
-
+		} else {
 			if !isRetryableStatusCode(resp.StatusCode) {
 				return resp, nil
+			}
+
+			if resp != nil {
+				resp.Body.Close()
 			}
 		}
 
@@ -139,7 +132,11 @@ func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int) 
 					newBody, err := req.GetBody()
 					if err == nil {
 						req.Body = newBody
+					} else {
+						return nil, err
 					}
+				} else {
+					return nil, fmt.Errorf("request body cannot be retried: GetBody is nil")
 				}
 			}
 		}
@@ -238,7 +235,7 @@ func ScanXSS(target string, cfg *config.Config) []Vulnerability {
 
 	req.Header.Set("User-Agent", cfg.General.UserAgent)
 
-	resp, err := client.Do(req)
+	resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 	if err != nil {
 		fmt.Printf("请求失败: %v\n", err)
 		return vulns

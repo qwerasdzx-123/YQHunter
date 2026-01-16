@@ -60,6 +60,10 @@ func createHTTPClient(cfg *config.Config) *http.Client {
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: cfg.General.SkipSSLVerify,
 		},
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false,
 	}
 
 	if cfg.General.Proxy != "" {
@@ -73,6 +77,26 @@ func createHTTPClient(cfg *config.Config) *http.Client {
 		Transport: transport,
 		Timeout:   time.Duration(cfg.General.Timeout) * time.Second,
 	}
+}
+
+func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int) (*http.Response, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+
+		if attempt < maxRetries {
+			backoff := time.Duration(attempt*attempt) * time.Second
+			time.Sleep(backoff)
+		}
+	}
+
+	return nil, lastErr
 }
 
 func RunScan(target string, cfg *config.Config) *ScanResult {
@@ -475,7 +499,13 @@ func ScanDirectories(target string, cfg *config.Config) []DirResult {
 		concurrency = 10
 	}
 
-	semaphore := make(chan struct{}, concurrency)
+	targetURL, err := url.Parse(target)
+	if err != nil {
+		fmt.Printf("解析目标 URL 失败: %v\n", err)
+		return results
+	}
+
+	taskChan := make(chan string, 100)
 	var wg sync.WaitGroup
 	total := len(wordlist)
 	scanned := 0
@@ -483,45 +513,55 @@ func ScanDirectories(target string, cfg *config.Config) []DirResult {
 
 	fmt.Printf("开始目录扫描，并发数: %d\n", concurrency)
 
-	for _, dir := range wordlist {
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
-		go func(d string) {
+		go func() {
 			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			testURL := target + "/" + d
-
-			req, err := http.NewRequest("GET", testURL, nil)
-			if err != nil {
-				return
-			}
-
-			req.Header.Set("User-Agent", cfg.General.UserAgent)
-
-			resp, err := client.Do(req)
-			if err != nil {
-				return
-			}
-			resp.Body.Close()
-
-			if resp.StatusCode != 404 {
-				resultsChan <- DirResult{
-					FullURL:    testURL,
-					Path:       "/" + d,
-					StatusCode: resp.StatusCode,
-					Size:       resp.ContentLength,
+			for dir := range taskChan {
+				reference, err := url.Parse(dir)
+				if err != nil {
+					continue
 				}
-			}
+				testURL := targetURL.ResolveReference(reference)
 
-			mu.Lock()
-			scanned++
-			if scanned%50 == 0 || scanned == total {
-				fmt.Printf("进度: %d/%d (%.1f%%)\n", scanned, total, float64(scanned)*100/float64(total))
+				req, err := http.NewRequest("HEAD", testURL.String(), nil)
+				if err != nil {
+					continue
+				}
+
+				req.Header.Set("User-Agent", cfg.General.UserAgent)
+
+				resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
+				if err != nil {
+					continue
+				}
+				resp.Body.Close()
+
+				if resp.StatusCode != 404 {
+					resultsChan <- DirResult{
+						FullURL:    testURL.String(),
+						Path:       "/" + dir,
+						StatusCode: resp.StatusCode,
+						Size:       resp.ContentLength,
+					}
+				}
+
+				mu.Lock()
+				scanned++
+				if scanned%50 == 0 || scanned == total {
+					fmt.Printf("进度: %d/%d (%.1f%%)\n", scanned, total, float64(scanned)*100/float64(total))
+				}
+				mu.Unlock()
 			}
-			mu.Unlock()
-		}(dir)
+		}()
 	}
+
+	go func() {
+		for _, dir := range wordlist {
+			taskChan <- dir
+		}
+		close(taskChan)
+	}()
 
 	go func() {
 		wg.Wait()

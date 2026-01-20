@@ -156,9 +156,6 @@ func GenerateHTMLReport(result *scanner.ScanResult, outputFile string) error {
                 <strong>扫描时长：</strong>` + result.EndTime.Sub(result.StartTime).String() + `
             </div>
             <div class="summary-item">
-                <strong>XSS 漏洞：</strong>` + fmt.Sprintf("%d", len(result.XSSResults)) + `
-            </div>
-            <div class="summary-item">
                 <strong>SSRF 漏洞：</strong>` + fmt.Sprintf("%d", len(result.SSRFResults)) + `
             </div>
             <div class="summary-item">
@@ -175,22 +172,6 @@ func GenerateHTMLReport(result *scanner.ScanResult, outputFile string) error {
             </div>
         </div>
 `
-
-	if len(result.XSSResults) > 0 {
-		html += `
-        <h2>XSS 漏洞</h2>
-`
-		for _, vuln := range result.XSSResults {
-			html += `
-        <div class="vulnerability ` + vuln.Severity + `">
-            <div class="vulnerability-type">` + vuln.Type + ` <span class="badge badge-` + vuln.Severity + `">` + vuln.Severity + `</span></div>
-            <div class="vulnerability-url">URL: ` + vuln.URL + `</div>
-            <div class="vulnerability-payload">载荷: ` + vuln.Payload + `</div>
-            <div class="vulnerability-proof">证明: ` + vuln.Proof + `</div>
-        </div>
-`
-		}
-	}
 
 	if len(result.SSRFResults) > 0 {
 		html += `
@@ -280,8 +261,8 @@ func GenerateHTMLReport(result *scanner.ScanResult, outputFile string) error {
                     <td>` + fp.Name + `</td>
                     <td>` + fp.Version + `</td>
                     <td>` + fp.Source + `</td>
-                    <td>` + result.Target + fp.MatchPath + `</td>
-                    <td>` + fmt.Sprintf("%d", fp.StatusCode) + `</td>
+                    <td>` + result.Target + `</td>
+                    <td>-</td>
                 </tr>
 `
 		}
@@ -338,7 +319,6 @@ func PrintSummary(result *scanner.ScanResult) {
 	fmt.Printf("扫描时长: %s\n", result.EndTime.Sub(result.StartTime))
 
 	fmt.Println("\n=== 漏洞统计 ===")
-	fmt.Printf("XSS 漏洞: %d\n", len(result.XSSResults))
 	fmt.Printf("SSRF 漏洞: %d\n", len(result.SSRFResults))
 	fmt.Printf("CORS 问题: %d\n", len(result.CORSResults))
 
@@ -346,15 +326,6 @@ func PrintSummary(result *scanner.ScanResult) {
 	fmt.Printf("发现的目录: %d\n", len(result.DirResults))
 	fmt.Printf("识别的技术: %d\n", len(result.Fingerprints))
 	fmt.Printf("发现的 API 端点: %d\n", len(result.APIEndpoints))
-
-	if len(result.XSSResults) > 0 {
-		fmt.Println("\n=== XSS 漏洞详情 ===")
-		for i, vuln := range result.XSSResults {
-			fmt.Printf("%d. [%s] %s\n", i+1, vuln.Severity, vuln.URL)
-			fmt.Printf("   载荷: %s\n", vuln.Payload)
-			fmt.Printf("   证明: %s\n", vuln.Proof)
-		}
-	}
 
 	if len(result.SSRFResults) > 0 {
 		fmt.Println("\n=== SSRF 漏洞详情 ===")

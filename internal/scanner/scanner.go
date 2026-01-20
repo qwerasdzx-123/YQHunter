@@ -1,18 +1,16 @@
 package scanner
 
 import (
-	"bytes"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"yqhunter/internal/config"
+	"yqhunter/internal/httpclient"
 )
 
 type Vulnerability struct {
@@ -28,7 +26,6 @@ type ScanResult struct {
 	Target       string
 	StartTime    time.Time
 	EndTime      time.Time
-	XSSResults   []Vulnerability
 	SSRFResults  []Vulnerability
 	CORSResults  []Vulnerability
 	DirResults   []DirResult
@@ -56,27 +53,8 @@ type APIEndpoint struct {
 }
 
 func createHTTPClient(cfg *config.Config) *http.Client {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: cfg.General.SkipSSLVerify,
-		},
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		DisableKeepAlives:   false,
-	}
-
-	if cfg.General.Proxy != "" {
-		parsedURL, err := url.Parse(cfg.General.Proxy)
-		if err == nil {
-			transport.Proxy = http.ProxyURL(parsedURL)
-		}
-	}
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   time.Duration(cfg.General.Timeout) * time.Second,
-	}
+	// 使用统一的HTTP客户端管理包
+	return httpclient.New(cfg).Client
 }
 
 func isRetryableError(err error) bool {
@@ -154,16 +132,6 @@ func RunScan(target string, cfg *config.Config) *ScanResult {
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, cfg.General.Concurrency)
 
-	if cfg.Scanner.EnableXSS {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-			result.XSSResults = ScanXSS(target, cfg)
-		}()
-	}
-
 	if cfg.Scanner.EnableSSRF {
 		wg.Add(1)
 		go func() {
@@ -220,184 +188,14 @@ func RunScan(target string, cfg *config.Config) *ScanResult {
 	return result
 }
 
-func ScanXSS(target string, cfg *config.Config) []Vulnerability {
-	vulns := make([]Vulnerability, 0)
-
-	client := createHTTPClient(cfg)
-
-	fmt.Printf("正在分析目标页面: %s\n", target)
-
-	req, err := http.NewRequest("GET", target, nil)
-	if err != nil {
-		fmt.Printf("创建请求失败: %v\n", err)
-		return vulns
-	}
-
-	req.Header.Set("User-Agent", cfg.General.UserAgent)
-
-	resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
-	if err != nil {
-		fmt.Printf("请求失败: %v\n", err)
-		return vulns
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Printf("读取响应失败: %v\n", err)
-		return vulns
-	}
-
-	bodyStr := string(body)
-
-	inputNames := extractInputNames(bodyStr)
-	fmt.Printf("发现 %d 个输入字段: %v\n", len(inputNames), inputNames)
-
-	if len(inputNames) == 0 {
-		inputNames = []string{"name", "search", "query", "q", "input", "text", "message", "comment"}
-	}
-
-	for _, payload := range cfg.Scanner.XSSPayloads {
-		for _, inputName := range inputNames {
-			formData := url.Values{}
-			formData.Set(inputName, payload)
-
-			req, err := http.NewRequest("POST", target, bytes.NewBufferString(formData.Encode()))
-			if err != nil {
-				continue
-			}
-
-			req.Header.Set("User-Agent", cfg.General.UserAgent)
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-			resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
-			if err != nil {
-				continue
-			}
-
-			body, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				continue
-			}
-
-			bodyStr := string(body)
-
-			if detectXSSInResponse(bodyStr, payload) {
-				vulns = append(vulns, Vulnerability{
-					Type:        "XSS",
-					URL:         target,
-					Payload:     payload,
-					Severity:    "中",
-					Description: "检测到跨站脚本漏洞",
-					Proof:       fmt.Sprintf("载荷 %s 在响应中反射", payload),
-				})
-				fmt.Printf("发现 XSS 漏洞: %s\n", payload)
-			}
-		}
-
-		for _, inputName := range inputNames {
-			testURL := target + "?" + inputName + "=" + url.QueryEscape(payload)
-
-			req, err := http.NewRequest("GET", testURL, nil)
-			if err != nil {
-				continue
-			}
-
-			req.Header.Set("User-Agent", cfg.General.UserAgent)
-
-			resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
-			if err != nil {
-				continue
-			}
-
-			body, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				continue
-			}
-
-			bodyStr := string(body)
-
-			if detectXSSInResponse(bodyStr, payload) {
-				vulns = append(vulns, Vulnerability{
-					Type:        "XSS",
-					URL:         testURL,
-					Payload:     payload,
-					Severity:    "中",
-					Description: "检测到跨站脚本漏洞",
-					Proof:       fmt.Sprintf("载荷 %s 在响应中反射", payload),
-				})
-				fmt.Printf("发现 XSS 漏洞: %s\n", payload)
-			}
-		}
-	}
-
-	return vulns
-}
-
-func extractInputNames(html string) []string {
-	names := make([]string, 0)
-
-	inputPattern := regexp.MustCompile(`<input[^>]*name=["']([^"']+)["'][^>]*>`)
-	matches := inputPattern.FindAllStringSubmatch(html, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			names = append(names, match[1])
-		}
-	}
-
-	textareaPattern := regexp.MustCompile(`<textarea[^>]*name=["']([^"']+)["'][^>]*>`)
-	matches = textareaPattern.FindAllStringSubmatch(html, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			names = append(names, match[1])
-		}
-	}
-
-	selectPattern := regexp.MustCompile(`<select[^>]*name=["']([^"']+)["'][^>]*>`)
-	matches = selectPattern.FindAllStringSubmatch(html, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			names = append(names, match[1])
-		}
-	}
-
-	return uniqueNames(names)
-}
-
-func uniqueNames(names []string) []string {
-	unique := make([]string, 0)
-	seen := make(map[string]bool)
-	for _, name := range names {
-		if !seen[name] {
-			seen[name] = true
-			unique = append(unique, name)
-		}
-	}
-	return unique
-}
-
-func detectXSSInResponse(body, payload string) bool {
-	if strings.Contains(body, payload) {
-		return true
-	}
-
-	escapedPayload := strings.ReplaceAll(payload, "<", "&lt;")
-	escapedPayload = strings.ReplaceAll(escapedPayload, ">", "&gt;")
-	if strings.Contains(body, escapedPayload) {
-		return true
-	}
-
-	if strings.Contains(body, "alert") && strings.Contains(body, "XSS") {
-		return true
-	}
-
-	if strings.Contains(body, "onerror") && strings.Contains(body, "alert") {
-		return true
-	}
-
-	return false
+// SSRFTest 定义SSRF测试用例
+type SSRFTest struct {
+	Method    string
+	ParamName string
+	Payload   string
+	Headers   map[string]string
+	Body      string
+	Severity  string
 }
 
 func ScanSSRF(target string, cfg *config.Config) []Vulnerability {
@@ -405,21 +203,81 @@ func ScanSSRF(target string, cfg *config.Config) []Vulnerability {
 
 	client := createHTTPClient(cfg)
 
-	for _, payload := range cfg.Scanner.SSRFPayloads {
-		testURL := target + "?url=" + url.QueryEscape(payload)
+	// 测试参数名列表
+	paramNames := []string{"url", "uri", "path", "endpoint", "target", "redirect", "forward", "proxy"}
 
-		req, err := http.NewRequest("GET", testURL, nil)
+	// 生成测试用例
+	tests := make([]SSRFTest, 0)
+	for _, payload := range cfg.Scanner.SSRFPayloads {
+		for _, paramName := range paramNames {
+			// GET请求测试
+			tests = append(tests, SSRFTest{
+				Method:    "GET",
+				ParamName: paramName,
+				Payload:   payload,
+				Headers:   map[string]string{},
+				Severity:  "高",
+			})
+
+			// POST表单测试
+			tests = append(tests, SSRFTest{
+				Method:    "POST",
+				ParamName: paramName,
+				Payload:   payload,
+				Headers: map[string]string{
+					"Content-Type": "application/x-www-form-urlencoded",
+				},
+				Body:     paramName + "=" + url.QueryEscape(payload),
+				Severity: "高",
+			})
+
+			// JSON格式测试
+			tests = append(tests, SSRFTest{
+				Method:    "POST",
+				ParamName: paramName,
+				Payload:   payload,
+				Headers: map[string]string{
+					"Content-Type": "application/json",
+				},
+				Body:     fmt.Sprintf(`{"%s":"%s"}`, paramName, payload),
+				Severity: "高",
+			})
+		}
+	}
+
+	// 执行所有测试用例
+	for _, test := range tests {
+		var testURL string
+		var req *http.Request
+		var err error
+
+		if test.Method == "GET" {
+			// GET请求：将参数加到URL中
+			testURL = fmt.Sprintf("%s?%s=%s", target, test.ParamName, url.QueryEscape(test.Payload))
+			req, err = http.NewRequest("GET", testURL, nil)
+		} else {
+			// POST请求：将参数放在请求体中
+			testURL = target
+			req, err = http.NewRequest("POST", testURL, strings.NewReader(test.Body))
+		}
+
 		if err != nil {
 			continue
 		}
 
+		// 设置请求头
 		req.Header.Set("User-Agent", cfg.General.UserAgent)
+		for key, value := range test.Headers {
+			req.Header.Set(key, value)
+		}
 
+		// 发送请求
 		resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 		if err != nil {
 			continue
 		}
 
+		// 读取响应
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
@@ -428,15 +286,15 @@ func ScanSSRF(target string, cfg *config.Config) []Vulnerability {
 
 		bodyStr := string(body)
 
-		if strings.Contains(bodyStr, "127.0.0.1") || strings.Contains(bodyStr, "localhost") ||
-			strings.Contains(bodyStr, "169.254.169.254") || strings.Contains(bodyStr, "meta-data") {
+		// 检测SSRF漏洞
+		if detectSSRFInResponse(bodyStr, test.Payload) {
 			vulns = append(vulns, Vulnerability{
 				Type:        "SSRF",
 				URL:         testURL,
-				Payload:     payload,
-				Severity:    "高",
-				Description: "检测到服务器端请求伪造漏洞",
-				Proof:       fmt.Sprintf("内部地址 %s 在响应中暴露", payload),
+				Payload:     test.Payload,
+				Severity:    test.Severity,
+				Description: fmt.Sprintf("检测到服务器端请求伪造漏洞，通过%s请求的%s参数", test.Method, test.ParamName),
+				Proof:       fmt.Sprintf("内部地址或特征在响应中暴露: %s", extractSSRFProof(bodyStr)),
 			})
 		}
 	}
@@ -444,55 +302,200 @@ func ScanSSRF(target string, cfg *config.Config) []Vulnerability {
 	return vulns
 }
 
+// detectSSRFInResponse 检测响应中的SSRF漏洞
+func detectSSRFInResponse(body, payload string) bool {
+	// 检测内部地址
+	internalIndicators := []string{
+		"127.0.0.1",
+		"localhost",
+		"169.254.169.254",
+		"meta-data",
+		"aws",
+		"ec2",
+		"google",
+		"gcp",
+		"azure",
+	}
+
+	for _, indicator := range internalIndicators {
+		if strings.Contains(body, indicator) {
+			return true
+		}
+	}
+
+	// 检测常见内部服务响应特征
+	responseIndicators := []string{
+		"Connection refused",
+		"No route to host",
+		"Internal Server Error",
+		"nginx/",
+		"apache/",
+		"Microsoft-IIS",
+	}
+
+	for _, indicator := range responseIndicators {
+		if strings.Contains(body, indicator) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// extractSSRFProof 提取SSRF漏洞的证明信息
+func extractSSRFProof(body string) string {
+	internalIndicators := []string{
+		"127.0.0.1",
+		"localhost",
+		"169.254.169.254",
+		"meta-data",
+		"aws",
+		"ec2",
+		"google",
+		"gcp",
+		"azure",
+	}
+
+	for _, indicator := range internalIndicators {
+		if strings.Contains(body, indicator) {
+			return indicator
+		}
+	}
+
+	return "响应包含内部服务特征"
+}
+
+// CORSTest 定义CORS测试用例
+type CORSTest struct {
+	Method              string
+	URL                 string
+	Origin              string
+	ACRequestMethod     string
+	ACRequestHeaders    []string
+	WithCredentials     bool
+	Severity            string
+}
+
 func ScanCORS(target string, cfg *config.Config) []Vulnerability {
 	vulns := make([]Vulnerability, 0)
 
 	client := createHTTPClient(cfg)
 
-	testOrigins := []string{
-		"http://evil.com",
-		"http://attacker.com",
-		"http://localhost:3000",
-		"*",
+	// 测试用例
+	tests := []CORSTest{
+		// OPTIONS请求测试
+		{
+			Method:              "OPTIONS",
+			URL:                 target,
+			Origin:              "http://evil.com",
+			ACRequestMethod:     "GET",
+			ACRequestHeaders:    []string{},
+			WithCredentials:     false,
+			Severity:            "高",
+		},
+		{
+			Method:              "OPTIONS",
+			URL:                 target,
+			Origin:              "http://attacker.com",
+			ACRequestMethod:     "POST",
+			ACRequestHeaders:    []string{"Content-Type"}, 
+			WithCredentials:     true,
+			Severity:            "高",
+		},
+		{
+			Method:              "OPTIONS",
+			URL:                 target,
+			Origin:              "http://localhost:3000",
+			ACRequestMethod:     "PUT",
+			ACRequestHeaders:    []string{},
+			WithCredentials:     false,
+			Severity:            "高",
+		},
+		// 实际GET请求测试
+		{
+			Method:              "GET",
+			URL:                 target,
+			Origin:              "http://evil.com",
+			ACRequestMethod:     "",
+			ACRequestHeaders:    []string{},
+			WithCredentials:     true,
+			Severity:            "高",
+		},
+		// 实际POST请求测试
+		{
+			Method:              "POST",
+			URL:                 target,
+			Origin:              "http://attacker.com",
+			ACRequestMethod:     "",
+			ACRequestHeaders:    []string{"Content-Type"},
+			WithCredentials:     true,
+			Severity:            "高",
+		},
 	}
 
-	for _, origin := range testOrigins {
-		req, err := http.NewRequest("OPTIONS", target, nil)
+	// 执行所有测试用例
+	for _, test := range tests {
+		var bodyReader io.Reader
+		req, err := http.NewRequest(test.Method, test.URL, bodyReader)
 		if err != nil {
 			continue
 		}
 
 		req.Header.Set("User-Agent", cfg.General.UserAgent)
-		req.Header.Set("Origin", origin)
-		req.Header.Set("Access-Control-Request-Method", "GET")
+		req.Header.Set("Origin", test.Origin)
 
+		if test.Method == "OPTIONS" {
+			if test.ACRequestMethod != "" {
+				req.Header.Set("Access-Control-Request-Method", test.ACRequestMethod)
+			}
+
+			for _, header := range test.ACRequestHeaders {
+				req.Header.Add("Access-Control-Request-Headers", header)
+			}
+		}
+
+		// 发送请求
 		resp, err := doRequestWithRetry(client, req, cfg.General.MaxRetries)
 		if err != nil {
 			continue
 		}
 
-		accessControlAllowOrigin := resp.Header.Get("Access-Control-Allow-Origin")
-		accessControlAllowCredentials := resp.Header.Get("Access-Control-Allow-Credentials")
+		acao := resp.Header.Get("Access-Control-Allow-Origin")
+		acac := resp.Header.Get("Access-Control-Allow-Credentials")
 		resp.Body.Close()
 
-		if accessControlAllowOrigin == "*" || accessControlAllowOrigin == origin {
-			if accessControlAllowCredentials == "true" {
+		// 检查CORS配置
+		if acao == "*" {
+			if acac == "true" {
 				vulns = append(vulns, Vulnerability{
 					Type:        "CORS",
-					URL:         target,
-					Payload:     origin,
+					URL:         test.URL,
+					Payload:     test.Origin,
 					Severity:    "高",
 					Description: "检测到 CORS 配置错误：允许任意来源并携带凭据",
-					Proof:       fmt.Sprintf("Access-Control-Allow-Origin: %s, Access-Control-Allow-Credentials: true", accessControlAllowOrigin),
+					Proof:       fmt.Sprintf("Access-Control-Allow-Origin: %s, Access-Control-Allow-Credentials: true", acao),
 				})
 			} else {
 				vulns = append(vulns, Vulnerability{
 					Type:        "CORS",
-					URL:         target,
-					Payload:     origin,
+					URL:         test.URL,
+					Payload:     test.Origin,
 					Severity:    "中",
 					Description: "检测到 CORS 配置错误：允许任意来源",
-					Proof:       fmt.Sprintf("Access-Control-Allow-Origin: %s", accessControlAllowOrigin),
+					Proof:       fmt.Sprintf("Access-Control-Allow-Origin: %s", acao),
+				})
+			}
+		}
+
+		if acao == test.Origin {
+			if acac == "true" && test.WithCredentials {
+				vulns = append(vulns, Vulnerability{
+					Type:        "CORS",
+					URL:         test.URL,
+					Payload:     test.Origin,
+					Severity:    "高",
+					Description: "检测到 CORS 配置错误：允许特定来源并携带凭据",
+					Proof:       fmt.Sprintf("Access-Control-Allow-Origin: %s, Access-Control-Allow-Credentials: true", acao),
 				})
 			}
 		}

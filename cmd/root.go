@@ -26,7 +26,7 @@ var rootCmd = &cobra.Command{
 	Use:   "yqhunter",
 	Short: "Web 安全扫描工具",
 	Long: `YQHunter 是一个综合性的 Web 安全扫描工具，包括：
-- XSS 和 SSRF 漏洞扫描
+- SSRF 漏洞扫描
 - CORS 配置错误检测
 - Web 爬虫和爬取
 - 目录扫描
@@ -34,7 +34,7 @@ var rootCmd = &cobra.Command{
 - API 端点发现
 
 使用示例:
-  yqhunter -x https://example.com        # XSS 和 SSRF 扫描
+  yqhunter -x https://example.com        # SSRF 扫描
   yqhunter -c https://example.com        # CORS 扫描
   yqhunter -d https://example.com        # 目录扫描
   yqhunter -d https://example.com -z common.txt  # 使用自定义字典进行目录扫描（自动在 dictionaries 目录查找）
@@ -54,7 +54,7 @@ var rootCmd = &cobra.Command{
 }
 
 var targetURL string
-var enableXSS bool
+var enableSSRF bool
 var enableCORS bool
 var enableDir bool
 var enableFingerprint bool
@@ -86,14 +86,14 @@ var rootRun = func(cmd *cobra.Command, args []string) {
 	}
 
 	if enableAll {
-		enableXSS = true
+		enableSSRF = true
 		enableCORS = true
 		enableDir = true
 		enableFingerprint = true
 		enableSpider = true
 	}
 
-	if !enableXSS && !enableCORS && !enableDir && !enableFingerprint && !enableSpider {
+	if !enableSSRF && !enableCORS && !enableDir && !enableFingerprint && !enableSpider {
 		fmt.Println("错误: 请至少选择一种扫描模式")
 		fmt.Println("使用 -h 查看帮助信息")
 		os.Exit(1)
@@ -102,7 +102,6 @@ var rootRun = func(cmd *cobra.Command, args []string) {
 	fmt.Printf("开始扫描目标: %s\n", targetURL)
 
 	var spiderResults *spider.SpiderResult
-	var xssVulns []scanner.Vulnerability
 	var ssrfVulns []scanner.Vulnerability
 	var corsVulns []scanner.Vulnerability
 	var dirPaths []scanner.DirResult
@@ -114,11 +113,7 @@ var rootRun = func(cmd *cobra.Command, args []string) {
 		fmt.Printf("爬取完成。发现 %d 个 URL\n", len(spiderResults.URLs))
 	}
 
-	if enableXSS {
-		fmt.Printf("开始 XSS 扫描目标: %s\n", targetURL)
-		xssVulns = scanner.ScanXSS(targetURL, cfg)
-		fmt.Printf("XSS 扫描完成。发现 %d 个漏洞\n", len(xssVulns))
-
+	if enableSSRF {
 		fmt.Printf("开始 SSRF 扫描目标: %s\n", targetURL)
 		ssrfVulns = scanner.ScanSSRF(targetURL, cfg)
 		fmt.Printf("SSRF 扫描完成。发现 %d 个漏洞\n", len(ssrfVulns))
@@ -179,7 +174,7 @@ var rootRun = func(cmd *cobra.Command, args []string) {
 					outputReport = outputReport + ".html"
 				}
 			}
-			err := generateComprehensiveHTMLReport(targetURL, spiderResults, xssVulns, ssrfVulns, corsVulns, dirPaths, fingerprints, outputReport)
+			err := generateComprehensiveHTMLReport(targetURL, spiderResults, ssrfVulns, corsVulns, dirPaths, fingerprints, outputReport)
 			if err != nil {
 				fmt.Printf("生成综合报告失败: %v\n", err)
 			} else {
@@ -196,14 +191,13 @@ var rootRun = func(cmd *cobra.Command, args []string) {
 				}
 			}
 
-			if enableXSS {
-				allVulns := append(xssVulns, ssrfVulns...)
-				xssOutput := getModuleOutputFile(outputReport, "xss")
-				err := exportVulnerabilities(allVulns, "XSS+SSRF", xssOutput)
+			if enableSSRF {
+				ssrfOutput := getModuleOutputFile(outputReport, "ssrf")
+				err := exportVulnerabilities(ssrfVulns, "SSRF", ssrfOutput)
 				if err != nil {
-					fmt.Printf("导出 XSS+SSRF 扫描结果失败: %v\n", err)
+					fmt.Printf("导出 SSRF 扫描结果失败: %v\n", err)
 				} else {
-					fmt.Printf("XSS+SSRF 扫描结果已导出到: %s\n", xssOutput)
+					fmt.Printf("SSRF 扫描结果已导出到: %s\n", ssrfOutput)
 				}
 			}
 
@@ -324,7 +318,7 @@ func convertYQFingerResults(yqResults []yqfinger.YQFingerResult) []fingerprint.F
 	return results
 }
 
-func generateComprehensiveHTMLReport(targetURL string, spiderResults *spider.SpiderResult, xssVulns, ssrfVulns, corsVulns []scanner.Vulnerability, dirPaths []scanner.DirResult, fingerprints []fingerprint.FingerprintResult, filename string) error {
+func generateComprehensiveHTMLReport(targetURL string, spiderResults *spider.SpiderResult, ssrfVulns, corsVulns []scanner.Vulnerability, dirPaths []scanner.DirResult, fingerprints []fingerprint.FingerprintResult, filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
@@ -484,10 +478,6 @@ func generateComprehensiveHTMLReport(targetURL string, spiderResults *spider.Spi
 
 	html += `
             <div class="summary-item">
-                <strong>XSS漏洞</strong>
-                <span>` + fmt.Sprintf("%d", len(xssVulns)) + `</span>
-            </div>
-            <div class="summary-item">
                 <strong>SSRF漏洞</strong>
                 <span>` + fmt.Sprintf("%d", len(ssrfVulns)) + `</span>
             </div>
@@ -539,22 +529,6 @@ func generateComprehensiveHTMLReport(targetURL string, spiderResults *spider.Spi
             </tbody>
         </table>
 `
-	}
-
-	if len(xssVulns) > 0 {
-		html += `
-        <h2>XSS 漏洞</h2>
-`
-		for _, vuln := range xssVulns {
-			html += `
-        <div class="vulnerability ` + vuln.Severity + `">
-            <div><strong>类型:</strong> ` + vuln.Type + ` <span class="badge badge-` + vuln.Severity + `">` + vuln.Severity + `</span></div>
-            <div><strong>URL:</strong> <a href="` + vuln.URL + `" class="url-link" target="_blank">` + vuln.URL + `</a></div>
-            <div><strong>载荷:</strong> ` + vuln.Payload + `</div>
-            <div><strong>证明:</strong> ` + vuln.Proof + `</div>
-        </div>
-`
-		}
 	}
 
 	if len(ssrfVulns) > 0 {
@@ -979,7 +953,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&proxyURL, "proxy", "", "代理地址（例如：http://127.0.0.1:8080 或 socks5://127.0.0.1:1080）")
 
 	rootCmd.Flags().StringVarP(&targetURL, "url", "u", "", "目标 URL（必需）")
-	rootCmd.Flags().BoolVarP(&enableXSS, "xss", "x", false, "启用 XSS 和 SSRF 扫描")
+	rootCmd.Flags().BoolVarP(&enableSSRF, "ssrf", "x", false, "启用 SSRF 扫描")
 	rootCmd.Flags().BoolVarP(&enableCORS, "cors", "c", false, "启用 CORS 扫描")
 	rootCmd.Flags().BoolVarP(&enableDir, "dir", "d", false, "启用目录扫描")
 	rootCmd.Flags().BoolVarP(&enableFingerprint, "fingerprint", "f", false, "启用指纹识别")

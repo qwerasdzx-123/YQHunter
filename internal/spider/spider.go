@@ -1,16 +1,18 @@
 package spider
 
 import (
-	"yqhunter/internal/config"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
+	"yqhunter/internal/config"
 
 	"github.com/gocolly/colly/v2"
 )
@@ -41,22 +43,22 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 		Headers:   make(map[string]string),
 		StartTime: time.Now(),
 	}
-	
+
 	if depth > 0 {
 		cfg.MaxDepth = depth
 	}
-	
+
 	collectorOpts := []colly.CollectorOption{
 		colly.MaxDepth(cfg.MaxDepth),
 		colly.Async(true),
 	}
-	
+
 	if len(cfg.AllowDomains) > 0 {
 		collectorOpts = append(collectorOpts, colly.AllowedDomains(cfg.AllowDomains...))
 	}
-	
+
 	c := colly.NewCollector(collectorOpts...)
-	
+
 	if cfg.Proxy != "" {
 		err := c.SetProxy(cfg.Proxy)
 		if err != nil {
@@ -65,43 +67,49 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 			fmt.Printf("使用代理: %s\n", cfg.Proxy)
 		}
 	}
-	
+
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
 		Parallelism: 10,
 		Delay:       1 * time.Second,
 	})
-	
+
 	var mu sync.Mutex
 	urlSet := make(map[string]bool)
 	urlCount := 0
 	maxPages := cfg.MaxPages
-	
+
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
+
+		if !isSafeURL(link) {
+			log.Printf("[Security] Blocked dangerous URL: %s", link)
+			return
+		}
+
 		absoluteURL := e.Request.AbsoluteURL(link)
-		
+
 		mu.Lock()
 		defer mu.Unlock()
-		
+
 		if !urlSet[absoluteURL] {
 			urlSet[absoluteURL] = true
 			result.URLs = append(result.URLs, URLInfo{URL: absoluteURL, Title: ""})
 			urlCount++
 		}
-		
+
 		if cfg.FollowLinks && (maxPages <= 0 || urlCount < maxPages) {
 			e.Request.Visit(link)
 		}
 	})
-	
+
 	c.OnHTML("title", func(e *colly.HTMLElement) {
 		title := e.Text
 		currentURL := e.Request.URL.String()
-		
+
 		mu.Lock()
 		defer mu.Unlock()
-		
+
 		for i, urlInfo := range result.URLs {
 			if urlInfo.URL == currentURL || urlInfo.URL == currentURL+"/" || currentURL == urlInfo.URL+"/" {
 				result.URLs[i].Title = title
@@ -109,13 +117,13 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 			}
 		}
 	})
-	
+
 	c.OnResponse(func(r *colly.Response) {
 		mu.Lock()
 		defer mu.Unlock()
-		
+
 		currentURL := r.Request.URL.String()
-		
+
 		found := false
 		for _, urlInfo := range result.URLs {
 			if urlInfo.URL == currentURL || urlInfo.URL == currentURL+"/" || currentURL == urlInfo.URL+"/" {
@@ -123,25 +131,31 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 				break
 			}
 		}
-		
+
 		if !found {
 			result.URLs = append(result.URLs, URLInfo{URL: currentURL, Title: ""})
 		}
-		
+
+		filteredHeaders := make(http.Header)
 		for key, values := range *r.Headers {
+			if !isSensitiveHeader(key) && len(values) > 0 {
+				filteredHeaders[key] = values
+			}
+		}
+		for key, values := range filteredHeaders {
 			if len(values) > 0 {
 				result.Headers[key] = values[0]
 			}
 		}
 	})
-	
+
 	c.OnHTML("form", func(e *colly.HTMLElement) {
 		action := e.Attr("action")
 		method := e.Attr("method")
 		if method == "" {
 			method = "GET"
 		}
-		
+
 		fields := make([]string, 0)
 		e.ForEach("input", func(i int, el *colly.HTMLElement) {
 			name := el.Attr("name")
@@ -149,27 +163,37 @@ func RunSpider(target string, cfg *config.SpiderConfig, depth int) *SpiderResult
 				fields = append(fields, name)
 			}
 		})
-		
+
 		mu.Lock()
 		defer mu.Unlock()
-		
+
 		result.Forms = append(result.Forms, FormInfo{
 			Action: action,
 			Method: method,
 			Fields: fields,
 		})
 	})
-	
+
+	var excludePathPattern = regexp.MustCompile(`^[a-zA-Z0-9/_.*-]+$`)
+
 	for _, excludePath := range cfg.ExcludePaths {
+		if len(excludePath) > 255 {
+			log.Printf("[Security] Exclude path too long, skipping: %s", excludePath)
+			continue
+		}
+		if !excludePathPattern.MatchString(excludePath) {
+			log.Printf("[Security] Invalid exclude path pattern, skipping: %s", excludePath)
+			continue
+		}
 		excludePattern := regexp.MustCompile(regexp.QuoteMeta(excludePath))
 		c.DisallowedURLFilters = append(c.DisallowedURLFilters, excludePattern)
 	}
-	
+
 	c.Visit(target)
 	c.Wait()
-	
+
 	result.EndTime = time.Now()
-	
+
 	return result
 }
 
@@ -177,7 +201,7 @@ func ExportResults(result *SpiderResult, format string, filename string) error {
 	if filename == "" {
 		filename = fmt.Sprintf("spider_results_%s.%s", time.Now().Format("20060102_150405"), format)
 	}
-	
+
 	switch format {
 	case "json":
 		return exportJSON(result, filename)
@@ -267,8 +291,8 @@ func exportTXT(result *SpiderResult, filename string) error {
 	fmt.Fprintf(file, "       YQHunter 爬虫结果\n")
 	fmt.Fprintf(file, "========================================\n\n")
 
-	fmt.Fprintf(file, "扫描时间: %s 至 %s\n", 
-		result.StartTime.Format("2006-01-02 15:04:05"), 
+	fmt.Fprintf(file, "扫描时间: %s 至 %s\n",
+		result.StartTime.Format("2006-01-02 15:04:05"),
 		result.EndTime.Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(file, "总耗时: %s\n\n", result.EndTime.Sub(result.StartTime).String())
 
@@ -313,8 +337,67 @@ func ValidateURL(target string) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	return parsedURL.Scheme == "http" || parsedURL.Scheme == "https"
+}
+
+var dangerousSchemes = []string{"javascript:", "data:", "vbscript:", "file:"}
+
+var internalNetworkPrefixes = []string{
+	"127.", "192.168.", "10.", "172.16.", "172.17.",
+	"172.18.", "172.19.", "172.2", "172.30.", "172.31.",
+	"[::1]", "fe80::", "fc00::",
+}
+
+var sensitiveHeaders = map[string]bool{
+	"authorization":       true,
+	"cookie":              true,
+	"set-cookie":          true,
+	"x-api-key":           true,
+	"x-auth-token":        true,
+	"x-access-token":      true,
+	"authorization-code":  true,
+	"proxy-authorization": true,
+}
+
+func isSafeURL(rawURL string) bool {
+	if rawURL == "" {
+		return false
+	}
+
+	lowerURL := strings.ToLower(rawURL)
+
+	for _, scheme := range dangerousSchemes {
+		if strings.HasPrefix(lowerURL, scheme) {
+			return false
+		}
+	}
+
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+
+	host := parsedURL.Hostname()
+	for _, prefix := range internalNetworkPrefixes {
+		if strings.HasPrefix(host, prefix) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isSensitiveHeader(headerName string) bool {
+	return sensitiveHeaders[strings.ToLower(headerName)]
+}
+
+func filterSensitiveHeaders(headers *http.Header) {
+	for key := range *headers {
+		if isSensitiveHeader(key) {
+			(*headers).Del(key)
+		}
+	}
 }
 
 func CheckRobotsTxt(target string) (bool, error) {
@@ -322,18 +405,18 @@ func CheckRobotsTxt(target string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	
+
 	robotsURL := fmt.Sprintf("%s://%s/robots.txt", parsedURL.Scheme, parsedURL.Host)
-	
+
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
-	
+
 	resp, err := client.Get(robotsURL)
 	if err != nil {
 		return false, err
 	}
 	defer resp.Body.Close()
-	
+
 	return resp.StatusCode == 200, nil
 }

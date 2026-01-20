@@ -1,0 +1,32 @@
+general:
+  timeout: 10
+  user_agent: "YQHunter/1.0"
+  max_retries: 3
+  proxy: ""
+  concurrency: 20
+  skip_ssl_verify: false
+
+scanner:
+  enable_ssrf: true
+  enable_cors: true
+  enable_dir_scan: true
+  enable_fingerprint: true
+  enable_api: true
+  dir_wordlist: "wordlists/directories.txt"
+  fingerprint_file: "fingerprints.yaml"
+
+spider:
+  max_depth: 3
+  max_pages: 1000
+  follow_links: true
+  allow_domains: []
+  exclude_paths:
+    - "/logout"
+    - "/signout"
+    - "/exit"
+  proxy: ""
+
+report:
+  output_dir: "reports"
+  format: "html"
+  include_details: true
